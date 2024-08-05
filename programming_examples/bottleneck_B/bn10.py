@@ -181,41 +181,41 @@ def build_module(bn10_scaleFactor1=10, bn10_scaleFactor2=7, bn10_scaleFactor3=9)
 
             @segment(name="seg")
             def segment_body():
-                # We want to store our data in L1 memory
-                mem_space_l2 = IntegerAttr.get(T.i32(), MemorySpace.L2)
 
-                # This is the type definition of the tile
-                tile_type_l2 = MemRefType.get(
-                    shape=(10, 10),
-                    element_type=int32_ty,
-                    memory_space=mem_space_l2,
+                @herd(
+                    name="bn10_0", sizes=[1, 1], link_with="bn10_conv2dk1_fused_relu.o"
                 )
-
-                # We must allocate a buffer of tile size for the input/output
-                tile_in_l2 = AllocOp(tile_type_l2, [], [])
-
-                # The herd sizes correspond to the dimensions of the contiguous block of cores we are hoping to get.
-                # We just need one compute core, so we ask for a 1x1 herd
-                @herd(name="copyherd", sizes=[1, 1])
                 def herd_body(tx, ty, sx, sy):
-
-                    # We want to store our data in L1 memory
                     mem_space_l1 = IntegerAttr.get(T.i32(), MemorySpace.L1)
-
-                    # This is the type definition of the tile
                     tile_type_l1 = MemRefType.get(
                         shape=(10, 10),
                         element_type=int32_ty,
                         memory_space=mem_space_l1,
                     )
-
-                    # We must allocate a buffer of tile size for the input/output
                     tile_in_l1 = AllocOp(tile_type_l1, [], [])
-                    tile_out_l1 = AllocOp(tile_type_l1, [], [])
-
-                    # Deallocate our L1 buffers
                     DeallocOp(tile_in_l1)
-                    DeallocOp(tile_out_l1)
+
+                @herd(name="bn10_1", sizes=[1, 1], link_with="bn10_conv2dk3_dw.o")
+                def herd_body(tx, ty, sx, sy):
+                    mem_space_l1 = IntegerAttr.get(T.i32(), MemorySpace.L1)
+                    tile_type_l1 = MemRefType.get(
+                        shape=(10, 10),
+                        element_type=int32_ty,
+                        memory_space=mem_space_l1,
+                    )
+                    tile_in_l1 = AllocOp(tile_type_l1, [], [])
+                    DeallocOp(tile_in_l1)
+
+                @herd(name="bn10_2", sizes=[1, 1], link_with="bn10_conv2dk1_ui8.o")
+                def herd_body(tx, ty, sx, sy):
+                    mem_space_l1 = IntegerAttr.get(T.i32(), MemorySpace.L1)
+                    tile_type_l1 = MemRefType.get(
+                        shape=(10, 10),
+                        element_type=int32_ty,
+                        memory_space=mem_space_l1,
+                    )
+                    tile_in_l1 = AllocOp(tile_type_l1, [], [])
+                    DeallocOp(tile_in_l1)
 
 
 if __name__ == "__main__":

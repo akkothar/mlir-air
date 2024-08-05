@@ -22,7 +22,7 @@ all: run
 print:
 	${powershell} python3 ${srcdir}/bn10.py -p
 
-run:
+run: ${srcdir}/build/bn10_conv2dk1_fused_relu.o ${srcdir}/build/bn10_conv2dk3_dw.o ${srcdir}/build/bn10_conv2dk1_ui8.o
 	mkdir -p ${srcdir}/build
 	cd ${srcdir}/build && ${powershell} python3 ${srcdir}/bn10.py
 
