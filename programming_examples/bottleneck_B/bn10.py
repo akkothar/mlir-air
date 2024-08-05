@@ -7,221 +7,92 @@ from air.ir import *
 from air.dialects.air import *
 from air.dialects.memref import AllocOp, DeallocOp
 from air.dialects.func import FuncOp
-from air.backend.xrt_runner import XRTRunner, type_mapper
+from air.dialects.scf import for_, yield_
+from air.backend.xrt_runner import XRTRunner
 
-bneck_10_InW1 = 14
-bneck_10_InH1 = 14
-bneck_10_InC1 = 80
-bneck_10_OutC1 = 480
+range_ = for_
 
-bneck_10_InW2 = 14
-bneck_10_InH2 = 14
-bneck_10_OutC2 = bneck_10_OutC1
+WEIGHTS_SIZE_LAYER1 = 8
+WEIGHTS_SIZE_LAYER2 = 16
+WEIGHTS_SIZE_LAYER3 = 8
+WEIGHTS_SIZE = WEIGHTS_SIZE_LAYER1 + WEIGHTS_SIZE_LAYER2 + WEIGHTS_SIZE_LAYER3
 
-bneck_10_InW3 = 14
-bneck_10_InH3 = 14
-bneck_10_OutC3 = 112
-
-OutC = bneck_10_OutC3
-OutH = bneck_10_InH3
-OutW = bneck_10_InW3
-
-activationsInSize32b = (bneck_10_InW1 * bneck_10_InH1 * bneck_10_InC1) // 4
-acitivationsOutSize32b = (OutW * OutH * OutC) // 4
-
-bn10_totalWeightsSize32b = (
-    bneck_10_InC1 * bneck_10_OutC1
-    + 3 * 3 * bneck_10_OutC2 * 1
-    + bneck_10_OutC2 * bneck_10_OutC3
-) // 4
-
-totalWeightsSize32b_complete = bn10_totalWeightsSize32b
-
-scale_factors = {
-    "BN10": {"conv1x1_1": 9, "conv3x3": 8, "conv1x1_2": 9, "skip_add": 0},
-    "BN11": {"conv1x1_1": 9, "conv3x3": 8, "conv1x1_2": 12, "skip_add": 1},
-}
+ACTIVATIONS_IN_SIZE = 16
+ACTIVATIONS_OUT_SIZE = 16
 
 
 @module_builder
-def build_module(bn10_scaleFactor1=10, bn10_scaleFactor2=7, bn10_scaleFactor3=9):
-    # define types
-    uint8_ty = IntegerType.get_unsigned(8)
-    int8_ty = IntegerType.get_signless(8)
-    int32_ty = IntegerType.get_signless(32)
-    # ************************ bneck10 ************************
-    ty_bneck_10_layer1_in = MemRefType.get(
-        (
-            bneck_10_InW1,
-            1,
-            bneck_10_InC1,
-        ),
-        int8_ty,
-    )
-    ty_bneck_10_layer2_in = MemRefType.get(
-        (
-            bneck_10_InW2,
-            1,
-            bneck_10_OutC1,
-        ),
-        uint8_ty,
-    )
-    ty_bneck_10_layer3_in = MemRefType.get(
-        (
-            bneck_10_InW3,
-            1,
-            bneck_10_OutC2,
-        ),
-        uint8_ty,
-    )
+def build_module():
+    activationsInL3_ty = MemRefType.get((ACTIVATIONS_IN_SIZE,), T.i32())
+    weightsInL3_ty = MemRefType.get((WEIGHTS_SIZE,), T.i32())
+    activationsOutL3_ty = MemRefType.get((ACTIVATIONS_OUT_SIZE,), T.i32())
 
-    # define wts
-    ty_bneck_10_layer1_wts = MemRefType.get((bneck_10_InC1 * bneck_10_OutC1,), int8_ty)
-    ty_bneck_10_layer2_wts = MemRefType.get((3 * 3 * bneck_10_OutC2 * 1,), int8_ty)
-    ty_bneck_10_layer3_wts = MemRefType.get((bneck_10_OutC2 * bneck_10_OutC3,), int8_ty)
-    ty_bneck_10_all_wts = MemRefType.get(
-        (
-            bneck_10_InC1 * bneck_10_OutC1
-            + 3 * 3 * bneck_10_OutC2 * 1
-            + bneck_10_OutC2 * bneck_10_OutC3,
-        ),
-        int8_ty,
+    mem_space_l1 = IntegerAttr.get(T.i32(), MemorySpace.L1)
+    activationsInL1_ty = MemRefType.get(
+        (ACTIVATIONS_IN_SIZE,), T.i32(), memory_space=mem_space_l1
     )
+    # weightsInL1_ty = MemRefType.get((WEIGHTS_SIZE,), T.i32(), memory_space=mem_space_l1)
+    # activationsOutL1_ty = MemRefType.get((ACTIVATIONS_OUT_SIZE,), T.i32(), memory_space=mem_space_l1)
 
-    # output
-    ty_bneck_10_layer1_out = MemRefType.get(
-        (
-            bneck_10_InW2,
-            1,
-            bneck_10_OutC1,
-        ),
-        uint8_ty,
-    )
-    ty_bneck_10_layer2_out = MemRefType.get(
-        (
-            bneck_10_InW3,
-            1,
-            bneck_10_OutC2,
-        ),
-        uint8_ty,
-    )
-    ty_bneck_10_layer3_out = MemRefType.get(
-        (
-            bneck_10_InW3,
-            1,
-            bneck_10_OutC3,
-        ),
-        int8_ty,
-    )
-    # ************************ bneck11 ************************
-    # input
-    ty_bneck_11_layer1_in = MemRefType.get(
-        (
-            bneck_10_InW3,
-            1,
-            bneck_10_OutC3,
-        ),
-        int8_ty,
-    )
+    ChannelOp("ActivationsIn")
+    ChannelOp("ActivationsLayer1Layer2")
+    ChannelOp("ActivationsLayer2Layer3")
+    ChannelOp("ActivationsOut")
 
-    # AIE Core Function declarations
-    # ************************ bneck10 ************************
-    bn10_conv2dk1_fused_relu = external_func(
-        "bn10_conv2dk1_relu_i8_ui8",
-        inputs=[
-            ty_bneck_10_layer1_in,
-            ty_bneck_10_layer1_wts,
-            ty_bneck_10_layer1_out,
-            int32_ty,
-            int32_ty,
-            int32_ty,
-            int32_ty,
-        ],
-    )
-    bn10_conv2dk3_dw = external_func(
-        "bn10_conv2dk3_dw_stride1_relu_ui8_ui8",
-        inputs=[
-            ty_bneck_10_layer2_in,
-            ty_bneck_10_layer2_in,
-            ty_bneck_10_layer2_in,
-            ty_bneck_10_layer2_wts,
-            ty_bneck_10_layer2_out,
-            int32_ty,
-            int32_ty,
-            int32_ty,
-            int32_ty,
-            int32_ty,
-            int32_ty,
-            int32_ty,
-            int32_ty,
-        ],
-    )
-    bn10_conv2dk1_ui8 = external_func(
-        "bn10_conv2dk1_ui8_i8",
-        inputs=[
-            ty_bneck_10_layer3_in,
-            ty_bneck_10_layer3_wts,
-            ty_bneck_10_layer3_out,
-            int32_ty,
-            int32_ty,
-            int32_ty,
-            int32_ty,
-        ],
-    )
-
-    activationsInL3_ty = MemRefType.get((activationsInSize32b,), int32_ty)
-    weightsInL3_ty = MemRefType.get((totalWeightsSize32b_complete,), int32_ty)
-    activationsOutL3_ty = MemRefType.get((acitivationsOutSize32b,), int32_ty)
+    # ChannelOp("WeightsInLayer1")
+    # ChannelOp("WeightsInLayer2")
+    # ChannelOp("WeightsInLayer3")
 
     @FuncOp.from_py_func(activationsInL3_ty, weightsInL3_ty, activationsOutL3_ty)
-    def sequence(inputFromL3, weightsFromL3, outputToL3):
+    def sequence(activationsIn, weightsIn, activationsOut):
 
-        @launch(operands=[inputFromL3, weightsFromL3, outputToL3])
-        def launch_body(inputL3, weightsL3, outputL3):
+        @launch(operands=[activationsIn, weightsIn, activationsOut])
+        def launch_body(activationsInL3, weightsInL3, activationsOutL3):
+
+            ChannelPut("ActivationsIn", activationsInL3)
+
+            # ChannelPut("WeightsInLayer1", weightsInL3)
+
+            ChannelGet("ActivationsOut", activationsOutL3)
 
             @segment(name="seg")
             def segment_body():
 
-                @herd(
-                    name="bn10_0", sizes=[1, 1], link_with="bn10_conv2dk1_fused_relu.o"
-                )
+                @herd(name="layer1", sizes=[1, 1])
                 def herd_body(tx, ty, sx, sy):
-                    mem_space_l1 = IntegerAttr.get(T.i32(), MemorySpace.L1)
-                    tile_type_l1 = MemRefType.get(
-                        shape=(10, 10),
-                        element_type=int32_ty,
-                        memory_space=mem_space_l1,
-                    )
-                    tile_in_l1 = AllocOp(tile_type_l1, [], [])
-                    DeallocOp(tile_in_l1)
+                    # Get the input activations to this layer
+                    activations_in = AllocOp(activationsInL1_ty, [], [])
+                    ChannelGet("ActivationsIn", activations_in)
 
-                @herd(name="bn10_1", sizes=[1, 1], link_with="bn10_conv2dk3_dw.o")
-                def herd_body(tx, ty, sx, sy):
-                    mem_space_l1 = IntegerAttr.get(T.i32(), MemorySpace.L1)
-                    tile_type_l1 = MemRefType.get(
-                        shape=(10, 10),
-                        element_type=int32_ty,
-                        memory_space=mem_space_l1,
-                    )
-                    tile_in_l1 = AllocOp(tile_type_l1, [], [])
-                    DeallocOp(tile_in_l1)
+                    # Send transformed activations to the next layer
+                    ChannelPut("ActivationsLayer1Layer2", activations_in)
+                    DeallocOp(activations_in)
 
-                @herd(name="bn10_2", sizes=[1, 1], link_with="bn10_conv2dk1_ui8.o")
+                @herd(name="layer2", sizes=[1, 1])
                 def herd_body(tx, ty, sx, sy):
-                    mem_space_l1 = IntegerAttr.get(T.i32(), MemorySpace.L1)
-                    tile_type_l1 = MemRefType.get(
-                        shape=(10, 10),
-                        element_type=int32_ty,
-                        memory_space=mem_space_l1,
-                    )
-                    tile_in_l1 = AllocOp(tile_type_l1, [], [])
-                    DeallocOp(tile_in_l1)
+                    # Get the input activations to this layer
+                    activations_in = AllocOp(activationsInL1_ty, [], [])
+                    ChannelGet("ActivationsLayer1Layer2", activations_in)
+
+                    # Send transformed activations to the next layer
+                    ChannelPut("ActivationsLayer2Layer3", activations_in)
+                    DeallocOp(activations_in)
+
+                @herd(name="layer3", sizes=[1, 1])
+                def herd_body(tx, ty, sx, sy):
+                    # Get the input activations to this layer
+                    activations_in = AllocOp(activationsInL1_ty, [], [])
+                    ChannelGet("ActivationsLayer2Layer3", activations_in)
+
+                    # Send transformed activations to the next layer
+                    ChannelPut("ActivationsOut", activations_in)
+                    DeallocOp(activations_in)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         prog="run.py",
-        description="Builds, runs, and tests the segment_alloc example",
+        description="Builds, runs, and tests the bottleneck block B example",
     )
     parser.add_argument(
         "-v",
@@ -235,19 +106,15 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    mlir_module = build_module(
-        bn10_scaleFactor1=scale_factors["BN10"]["conv1x1_1"],
-        bn10_scaleFactor2=scale_factors["BN10"]["conv3x3"],
-        bn10_scaleFactor3=scale_factors["BN10"]["conv1x1_2"],
-    )
+    mlir_module = build_module()
 
     if args.print_module_only:
         print(mlir_module)
         exit(0)
 
-    activationsIn = np.zeros(shape=(activationsInSize32b,), dtype=np.int32)
-    weightsIn = np.zeros(shape=(totalWeightsSize32b_complete,), dtype=np.int32)
-    activationsOut = np.zeros(shape=(acitivationsOutSize32b,), dtype=np.int32)
+    activationsIn = np.zeros(shape=(ACTIVATIONS_IN_SIZE,), dtype=np.int32)
+    weightsIn = np.zeros(shape=(WEIGHTS_SIZE,), dtype=np.int32)
+    activationsOut = np.zeros(shape=(ACTIVATIONS_OUT_SIZE,), dtype=np.int32)
 
     runner = XRTRunner(verbose=args.verbose, experimental_passes=True)
     exit(
