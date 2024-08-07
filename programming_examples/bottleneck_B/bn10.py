@@ -15,12 +15,13 @@ range_ = for_
 WEIGHTS_SIZE_LAYER1 = 8
 WEIGHTS_SIZE_LAYER2 = 16
 WEIGHTS_SIZE_LAYER3 = 8
-WEIGHTS_SIZE = WEIGHTS_SIZE_LAYER1 + WEIGHTS_SIZE_LAYER2 + WEIGHTS_SIZE_LAYER3
-
 # so we can convert to int32 for channel offset
 assert WEIGHTS_SIZE_LAYER1 % 4 == 0
 assert WEIGHTS_SIZE_LAYER2 % 4 == 0
 assert WEIGHTS_SIZE_LAYER3 % 4 == 0
+
+WEIGHTS_SIZE = WEIGHTS_SIZE_LAYER1 + WEIGHTS_SIZE_LAYER2 + WEIGHTS_SIZE_LAYER3
+WEIGHTS_SIZE_32B = WEIGHTS_SIZE // 4
 
 ACTIVATIONS_IN_SIZE = 16
 ACTIVATIONS_OUT_SIZE = 16
@@ -29,25 +30,25 @@ assert ACTIVATIONS_IN_SIZE == ACTIVATIONS_OUT_SIZE
 
 @module_builder
 def build_module():
-    activationsInL3_ty = MemRefType.get((ACTIVATIONS_IN_SIZE,), T.i32())
-    weightsInL3_ty = MemRefType.get((WEIGHTS_SIZE,), T.i32())
-    activationsOutL3_ty = MemRefType.get((ACTIVATIONS_OUT_SIZE,), T.i32())
+    activationsInL3_ty = MemRefType.get((ACTIVATIONS_IN_SIZE,), T.i8())
+    weightsInL3_ty = MemRefType.get((WEIGHTS_SIZE_32B,), T.i32())
+    activationsOutL3_ty = MemRefType.get((ACTIVATIONS_OUT_SIZE,), T.i8())
 
     mem_space_l1 = IntegerAttr.get(T.i32(), MemorySpace.L1)
     activationsInL1_ty = MemRefType.get(
-        (ACTIVATIONS_IN_SIZE,), T.i32(), memory_space=mem_space_l1
+        (ACTIVATIONS_IN_SIZE,), T.i8(), memory_space=mem_space_l1
     )
     weightsInLayer1L1_ty = MemRefType.get(
-        (WEIGHTS_SIZE_LAYER1,), T.i32(), memory_space=mem_space_l1
+        (WEIGHTS_SIZE_LAYER1,), T.i8(), memory_space=mem_space_l1
     )
     weightsInLayer2L1_ty = MemRefType.get(
-        (WEIGHTS_SIZE_LAYER2,), T.i32(), memory_space=mem_space_l1
+        (WEIGHTS_SIZE_LAYER2,), T.i8(), memory_space=mem_space_l1
     )
     weightsInLayer3L1_ty = MemRefType.get(
-        (WEIGHTS_SIZE_LAYER3,), T.i32(), memory_space=mem_space_l1
+        (WEIGHTS_SIZE_LAYER3,), T.i8(), memory_space=mem_space_l1
     )
     activationsOutL1_ty = MemRefType.get(
-        (ACTIVATIONS_OUT_SIZE,), T.i32(), memory_space=mem_space_l1
+        (ACTIVATIONS_OUT_SIZE,), T.i8(), memory_space=mem_space_l1
     )
 
     ChannelOp("ActivationsIn")
@@ -70,22 +71,22 @@ def build_module():
             ChannelPut(
                 "WeightsInLayer1",
                 weightsInL3,
-                sizes=(WEIGHTS_SIZE_LAYER1,),
+                sizes=(WEIGHTS_SIZE_LAYER1 // 4,),
                 offsets=(0,),
                 strides=(1,),
             )
             ChannelPut(
                 "WeightsInLayer2",
                 weightsInL3,
-                sizes=(WEIGHTS_SIZE_LAYER2,),
-                offsets=(WEIGHTS_SIZE_LAYER1,),
+                sizes=(WEIGHTS_SIZE_LAYER2 // 4,),
+                offsets=(WEIGHTS_SIZE_LAYER1 // 4,),
                 strides=(1,),
             )
             ChannelPut(
                 "WeightsInLayer3",
                 weightsInL3,
-                sizes=(WEIGHTS_SIZE_LAYER3,),
-                offsets=(WEIGHTS_SIZE_LAYER1 + WEIGHTS_SIZE_LAYER2,),
+                sizes=(WEIGHTS_SIZE_LAYER3 // 4,),
+                offsets=((WEIGHTS_SIZE_LAYER1 + WEIGHTS_SIZE_LAYER2) // 4,),
                 strides=(1,),
             )
 
@@ -215,9 +216,9 @@ if __name__ == "__main__":
         print(mlir_module)
         exit(0)
 
-    activationsIn = np.full(shape=(ACTIVATIONS_IN_SIZE,), fill_value=1, dtype=np.int32)
-    weightsIn = np.zeros(shape=(WEIGHTS_SIZE,), dtype=np.int32)
-    activationsOut = np.full(shape=(ACTIVATIONS_IN_SIZE,), fill_value=1, dtype=np.int32)
+    activationsIn = np.full(shape=(ACTIVATIONS_IN_SIZE,), fill_value=1, dtype=np.int8)
+    weightsIn = np.zeros(shape=(WEIGHTS_SIZE,), dtype=np.int8)
+    activationsOut = np.full(shape=(ACTIVATIONS_IN_SIZE,), fill_value=1, dtype=np.int8)
 
     for i in range(WEIGHTS_SIZE):
         if i < WEIGHTS_SIZE_LAYER1:
@@ -228,14 +229,16 @@ if __name__ == "__main__":
             weightsIn[i] = 7
 
     for i in range(WEIGHTS_SIZE_LAYER1):
-        activationsOut[i] += weightsIn[i]
+        activationsOut[i] = (activationsOut[i] + weightsIn[i]) % 0xF
     for i in range(WEIGHTS_SIZE_LAYER2):
-        activationsOut[i] += weightsIn[WEIGHTS_SIZE_LAYER1 + i]
+        activationsOut[i] = (
+            activationsOut[i] + weightsIn[WEIGHTS_SIZE_LAYER1 + i]
+        ) % 0xF
     for i in range(WEIGHTS_SIZE_LAYER3):
-        print((WEIGHTS_SIZE - WEIGHTS_SIZE_LAYER3) + i)
-        activationsOut[(ACTIVATIONS_IN_SIZE - WEIGHTS_SIZE_LAYER3) + i] += weightsIn[
-            (WEIGHTS_SIZE - WEIGHTS_SIZE_LAYER3) + i
-        ]
+        activationsOut[(ACTIVATIONS_IN_SIZE - WEIGHTS_SIZE_LAYER3) + i] = (
+            activationsOut[(ACTIVATIONS_IN_SIZE - WEIGHTS_SIZE_LAYER3) + i]
+            + weightsIn[(WEIGHTS_SIZE - WEIGHTS_SIZE_LAYER3) + i]
+        ) % 0xF
 
     runner = XRTRunner(verbose=args.verbose, experimental_passes=True)
     exit(
