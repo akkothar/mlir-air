@@ -169,11 +169,17 @@ def build_module():
 
             @segment(name="seg")
             def segment_body():
-
                 @herd(name="bn10_layer1", sizes=[1, 1])
                 def herd_body(tx, ty, sx, sy):
                     weights_in = AllocOp(bn10_layer1_wts_ty, [], [])
                     ChannelGet("bn10_wts_layer1", weights_in)
+
+                    bytes_input = np.prod(bn10_layer1_in_ty.shape) * (bn10_InH1)
+                    expected_bytes_input = np.prod(activationsInL3_ty.shape)
+                    print(
+                        f"bn10_layer1 TOTAL INPUT: {bytes_input}, EXPECTED INPUT: {expected_bytes_input}"
+                    )
+                    assert bytes_input == expected_bytes_input
 
                     for _ in range_(bn10_InH1):
                         activations_in = AllocOp(bn10_layer1_in_ty, [], [])
@@ -200,6 +206,15 @@ def build_module():
                 def herd_body(tx, ty, sx, sy):
                     weights_in = AllocOp(bn10_layer2_wts_ty, [], [])
                     ChannelGet("bn10_wts_layer2", weights_in)
+
+                    bytes_input = np.prod(bn10_layer2_in_ty.shape) * (
+                        2 + (bn10_InH2 - 2) * 3 + 2
+                    )
+                    expected_bytes_input = np.prod(bn10_layer1_out_ty.shape) * bn10_InH1
+                    print(
+                        f"bn10_layer2 TOTAL INPUT: {bytes_input}, EXPECTED INPUT: {expected_bytes_input}"
+                    )
+                    assert bytes_input == expected_bytes_input
 
                     # Preamble: top row
                     activations_in_0 = AllocOp(bn10_layer2_in_ty, [], [])
@@ -271,6 +286,13 @@ def build_module():
 
                     ChannelPut("bn10_act_layer2_layer3", activations_out_2)
 
+                    bytes_output = np.prod(bn10_layer3_in_ty.shape) * bn10_InH2
+                    expected_bytes_output = np.prod(bn10_layer3_in_ty.shape) * bn10_InH3
+                    print(
+                        f"bn10_layer2 TOTAL OUTPUT: {bytes_output}, EXPECTED OUTPUT: {expected_bytes_output}"
+                    )
+                    assert bytes_output == expected_bytes_output
+
                     DeallocOp(activations_in_5)
                     DeallocOp(activations_in_6)
                     DeallocOp(activations_out_2)
@@ -278,9 +300,10 @@ def build_module():
                 @herd(name="bn10_layer3", sizes=[1, 1])
                 def herd_body(tx, ty, sx, sy):
                     weights_in = AllocOp(bn10_layer3_wts_ty, [], [])
+
                     ChannelGet("bn10_wts_layer3", weights_in)
 
-                    for _ in range_(bn10_InH3):
+                    for input_tile in range_(bn10_InH3):
                         activations_in = AllocOp(bn10_layer3_in_ty, [], [])
                         activations_out = AllocOp(bn10_layer3_out_ty, [], [])
 
@@ -290,7 +313,9 @@ def build_module():
                         set_memory(
                             activations_out,
                             bn10_layer3_out_ty,
-                            load(weights_in, [c0]),
+                            arith.index_cast(
+                                bn10_layer3_out_ty.element_type, input_tile
+                            ),  # load(weights_in, [c0]),
                             load(activations_in, [c0, c0, c0]),
                         )
 
@@ -299,6 +324,13 @@ def build_module():
                         DeallocOp(activations_in)
                         DeallocOp(activations_out)
                         yield_([])
+
+                    bytes_output = np.prod(bn10_layer3_out_ty.shape) * bn10_InH3
+                    expected_bytes_output = np.prod(activationsOutL3_ty.shape)
+                    print(
+                        f"bn10_layer3 TOTAL OUTPUT: {bytes_output}, EXPECTED OUTPUT: {expected_bytes_output} TILES: {bn10_InH3}"
+                    )
+                    assert bytes_output == expected_bytes_output
 
                     DeallocOp(weights_in)
 
