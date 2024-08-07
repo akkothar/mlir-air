@@ -12,53 +12,128 @@ from air.backend.xrt_runner import XRTRunner
 
 range_ = for_
 
-WEIGHTS_SIZE_LAYER1 = 8
-WEIGHTS_SIZE_LAYER2 = 16
-WEIGHTS_SIZE_LAYER3 = 8
-# so we can convert to int32 for channel offset
-assert WEIGHTS_SIZE_LAYER1 % 4 == 0
-assert WEIGHTS_SIZE_LAYER2 % 4 == 0
-assert WEIGHTS_SIZE_LAYER3 % 4 == 0
+bn10_InW1 = 8
+bn10_InH1 = 8
+bn10_InC1 = 16
+bn10_OutC1 = 64
 
-WEIGHTS_SIZE = WEIGHTS_SIZE_LAYER1 + WEIGHTS_SIZE_LAYER2 + WEIGHTS_SIZE_LAYER3
-WEIGHTS_SIZE_32B = WEIGHTS_SIZE // 4
+bn10_InW2 = 8
+bn10_InH2 = 8
+bn10_OutC2 = bn10_OutC1
 
-ACTIVATIONS_IN_SIZE = 16
-ACTIVATIONS_OUT_SIZE = 16
-assert ACTIVATIONS_IN_SIZE == ACTIVATIONS_OUT_SIZE
+bn10_InW3 = 8
+bn10_InH3 = 8
+bn10_OutC3 = 32
+
+OutC = bn10_OutC3
+OutH = bn10_InH3
+OutW = bn10_InW3
+
+bn10_layer1_wts_size = bn10_InC1 * bn10_OutC1
+bn10_layer2_wts_size = 3 * 3 * bn10_OutC2 * 1
+bn10_layer3_wts_size = bn10_OutC2 * bn10_OutC3
+bn10_total_wts_size = bn10_layer1_wts_size + bn10_layer2_wts_size + bn10_layer3_wts_size
+# This is so we can correctly convert to/from int8/int32
+assert bn10_layer1_wts_size % 4 == 0
+assert bn10_layer2_wts_size % 4 == 0
+assert bn10_layer3_wts_size % 4 == 0
+
+activationsInSize = bn10_InW1 * bn10_InH1 * bn10_InC1
+activationsOutSize = OutW * OutH * OutC
+bn10_totalWeightsSize = bn10_total_wts_size
+assert bn10_totalWeightsSize % 4 == 0
+bn10_totalWeightsSize32b = bn10_total_wts_size // 4
+
+
+def set_memory(mem_region, mem_type, value, weight):
+    val = arith.addi(value, weight)
+    sizes = mem_type.shape
+    assert len(sizes) == 3
+    for i in range_(sizes[0]):
+        for j in range_(sizes[1]):
+            for k in range_(sizes[2]):
+                store(val, mem_region, [i, j, k])
+                yield_([])
+            yield_([])
+        yield_([])
 
 
 @module_builder
 def build_module():
-    activationsInL3_ty = MemRefType.get((ACTIVATIONS_IN_SIZE,), T.i8())
-    weightsInL3_ty = MemRefType.get((WEIGHTS_SIZE_32B,), T.i32())
-    activationsOutL3_ty = MemRefType.get((ACTIVATIONS_OUT_SIZE,), T.i8())
+    # Define types
+    uint8_ty = IntegerType.get_unsigned(8)
+    int8_ty = IntegerType.get_signless(8)
+    int32_ty = IntegerType.get_signless(32)
+
+    # Input/output types. Notice we treat weights as i32 for easier channel sizes/strides/offsets
+    activationsInL3_ty = MemRefType.get((activationsInSize,), int8_ty)
+    activationsOutL3_ty = MemRefType.get((activationsOutSize,), int8_ty)
+    # Notice we treat weights as i32 for easier channel sizes/strides/offsets
+    weightsInL3_ty = MemRefType.get((bn10_totalWeightsSize32b,), int32_ty)
 
     mem_space_l1 = IntegerAttr.get(T.i32(), MemorySpace.L1)
-    activationsInL1_ty = MemRefType.get(
-        (ACTIVATIONS_IN_SIZE,), T.i8(), memory_space=mem_space_l1
+
+    # Define inputs
+    bn10_layer1_in_ty = MemRefType.get(
+        shape=(
+            bn10_InW1,
+            1,
+            bn10_InC1,
+        ),
+        element_type=int8_ty,
+        memory_space=mem_space_l1,
     )
-    weightsInLayer1L1_ty = MemRefType.get(
-        (WEIGHTS_SIZE_LAYER1,), T.i8(), memory_space=mem_space_l1
+    bn10_layer2_in_ty = MemRefType.get(
+        shape=(
+            bn10_InW2,
+            1,
+            bn10_OutC1,
+        ),
+        element_type=int8_ty,  # TODO: uint8_ty,
+        memory_space=mem_space_l1,
     )
-    weightsInLayer2L1_ty = MemRefType.get(
-        (WEIGHTS_SIZE_LAYER2,), T.i8(), memory_space=mem_space_l1
-    )
-    weightsInLayer3L1_ty = MemRefType.get(
-        (WEIGHTS_SIZE_LAYER3,), T.i8(), memory_space=mem_space_l1
-    )
-    activationsOutL1_ty = MemRefType.get(
-        (ACTIVATIONS_OUT_SIZE,), T.i8(), memory_space=mem_space_l1
+    bn10_layer3_in_ty = MemRefType.get(
+        (
+            bn10_InW3,
+            1,
+            bn10_OutC2,
+        ),
+        int8_ty,  # TODO: uint8_ty,
+        memory_space=mem_space_l1,
     )
 
-    ChannelOp("ActivationsIn")
-    ChannelOp("ActivationsLayer1Layer2")
-    ChannelOp("ActivationsLayer2Layer3")
-    ChannelOp("ActivationsOut")
+    # Define outputs
+    bn10_layer1_out_ty = bn10_layer2_in_ty
+    bn10_layer2_out_ty = bn10_layer3_in_ty
+    bn10_layer3_out_ty = MemRefType.get(
+        (
+            bn10_InW3,
+            1,
+            bn10_OutC3,
+        ),
+        int8_ty,
+        memory_space=mem_space_l1,
+    )
 
-    ChannelOp("WeightsInLayer1")
-    ChannelOp("WeightsInLayer2")
-    ChannelOp("WeightsInLayer3")
+    # Define weights
+    bn10_layer1_wts_ty = MemRefType.get(
+        (bn10_layer1_wts_size,), int8_ty, memory_space=mem_space_l1
+    )
+    bn10_layer2_wts_ty = MemRefType.get(
+        (bn10_layer2_wts_size,), int8_ty, memory_space=mem_space_l1
+    )
+    bn10_layer3_wts_ty = MemRefType.get(
+        (bn10_layer3_wts_size,), int8_ty, memory_space=mem_space_l1
+    )
+
+    ChannelOp("bn10_act_memtile_layer1")
+    ChannelOp("bn10_act_layer1_layer2")
+    ChannelOp("bn10_act_layer2_layer3")
+    ChannelOp("bn10_act_layer3_memtile")
+
+    ChannelOp("bn10_wts_layer1")
+    ChannelOp("bn10_wts_layer2")
+    ChannelOp("bn10_wts_layer3")
 
     @FuncOp.from_py_func(activationsInL3_ty, weightsInL3_ty, activationsOutL3_ty)
     def sequence(activationsIn, weightsIn, activationsOut):
@@ -66,131 +141,166 @@ def build_module():
         @launch(operands=[activationsIn, weightsIn, activationsOut])
         def launch_body(activationsInL3, weightsInL3, activationsOutL3):
 
-            ChannelPut("ActivationsIn", activationsInL3)
+            ChannelPut("bn10_act_memtile_layer1", activationsInL3)
 
             ChannelPut(
-                "WeightsInLayer1",
+                "bn10_wts_layer1",
                 weightsInL3,
-                sizes=(WEIGHTS_SIZE_LAYER1 // 4,),
+                sizes=(bn10_layer1_wts_size // 4,),
                 offsets=(0,),
                 strides=(1,),
             )
             ChannelPut(
-                "WeightsInLayer2",
+                "bn10_wts_layer2",
                 weightsInL3,
-                sizes=(WEIGHTS_SIZE_LAYER2 // 4,),
-                offsets=(WEIGHTS_SIZE_LAYER1 // 4,),
+                sizes=(bn10_layer2_wts_size // 4,),
+                offsets=(bn10_layer1_wts_size // 4,),
                 strides=(1,),
             )
             ChannelPut(
-                "WeightsInLayer3",
+                "bn10_wts_layer3",
                 weightsInL3,
-                sizes=(WEIGHTS_SIZE_LAYER3 // 4,),
-                offsets=((WEIGHTS_SIZE_LAYER1 + WEIGHTS_SIZE_LAYER2) // 4,),
+                sizes=(bn10_layer3_wts_size // 4,),
+                offsets=((bn10_layer1_wts_size + bn10_layer2_wts_size) // 4,),
                 strides=(1,),
             )
 
-            ChannelGet("ActivationsOut", activationsOutL3)
+            ChannelGet("bn10_act_layer3_memtile", activationsOutL3)
 
             @segment(name="seg")
             def segment_body():
 
-                @herd(name="layer1", sizes=[1, 1])
+                @herd(name="bn10_layer1", sizes=[1, 1])
                 def herd_body(tx, ty, sx, sy):
-                    activations_in = AllocOp(activationsInL1_ty, [], [])
-                    weights_in = AllocOp(weightsInLayer1L1_ty, [], [])
-                    activations_out = AllocOp(activationsOutL1_ty, [], [])
+                    weights_in = AllocOp(bn10_layer1_wts_ty, [], [])
+                    ChannelGet("bn10_wts_layer1", weights_in)
 
-                    ChannelGet("ActivationsIn", activations_in)
-                    ChannelGet("WeightsInLayer1", weights_in)
+                    for _ in range_(bn10_InH1):
+                        activations_in = AllocOp(bn10_layer1_in_ty, [], [])
+                        activations_out = AllocOp(bn10_layer1_out_ty, [], [])
 
-                    # Do something with the first bit of data
-                    for i in range_(WEIGHTS_SIZE_LAYER1):
-                        val = load(activations_in, [i])
-                        weight_val = load(weights_in, [i])
-                        val_out = arith.AddIOp(val, weight_val)
-                        store(val_out, activations_out, [i])
-                        yield_([])
+                        ChannelGet("bn10_act_memtile_layer1", activations_in)
 
-                    # Passthrough the rest
-                    for i in range_(ACTIVATIONS_IN_SIZE - WEIGHTS_SIZE_LAYER1):
-                        index = arith.AddIOp(
-                            i, arith.ConstantOp.create_index(WEIGHTS_SIZE_LAYER1)
+                        c0 = arith.ConstantOp.create_index(0)
+                        set_memory(
+                            activations_out,
+                            bn10_layer1_out_ty,
+                            load(weights_in, [c0]),
+                            load(activations_in, [c0, c0, c0]),
                         )
-                        val = load(activations_in, [index])
-                        store(val, activations_out, [index])
+
+                        ChannelPut("bn10_act_layer1_layer2", activations_out)
+
+                        DeallocOp(activations_in)
+                        DeallocOp(activations_out)
                         yield_([])
-
-                    # Send transformed activations to the next layer
-                    ChannelPut("ActivationsLayer1Layer2", activations_out)
-
-                    # Cleanup
-                    DeallocOp(activations_in)
                     DeallocOp(weights_in)
-                    DeallocOp(activations_out)
 
-                @herd(name="layer2", sizes=[1, 1])
+                @herd(name="bn10_layer2", sizes=[1, 1])
                 def herd_body(tx, ty, sx, sy):
-                    activations_in = AllocOp(activationsInL1_ty, [], [])
-                    weights_in = AllocOp(weightsInLayer2L1_ty, [], [])
-                    activations_out = AllocOp(activationsOutL1_ty, [], [])
+                    weights_in = AllocOp(bn10_layer2_wts_ty, [], [])
+                    ChannelGet("bn10_wts_layer2", weights_in)
 
-                    ChannelGet("ActivationsLayer1Layer2", activations_in)
-                    ChannelGet("WeightsInLayer2", weights_in)
+                    # Preamble: top row
+                    activations_in_0 = AllocOp(bn10_layer2_in_ty, [], [])
+                    activations_in_1 = AllocOp(bn10_layer2_in_ty, [], [])
 
-                    # Do something with the first bit of data
-                    assert ACTIVATIONS_IN_SIZE == WEIGHTS_SIZE_LAYER2
-                    for i in range_(ACTIVATIONS_IN_SIZE):
-                        val = load(activations_in, [i])
-                        weight_val = load(weights_in, [i])
-                        val_out = arith.AddIOp(val, weight_val)
-                        store(val_out, activations_out, [i])
-                        yield_([])
+                    ChannelGet("bn10_act_layer1_layer2", activations_in_0)
+                    ChannelGet("bn10_act_layer1_layer2", activations_in_1)
 
-                    # Send transformed activations to the next layer
-                    ChannelPut("ActivationsLayer2Layer3", activations_out)
+                    activations_out_0 = AllocOp(bn10_layer2_out_ty, [], [])
 
-                    # Cleanup
-                    DeallocOp(activations_in)
-                    DeallocOp(weights_in)
-                    DeallocOp(activations_out)
+                    c0 = arith.ConstantOp.create_index(0)
+                    set_memory(
+                        activations_out_0,
+                        bn10_layer2_out_ty,
+                        load(weights_in, [c0]),
+                        load(activations_in_0, [c0, c0, c0]),
+                    )
 
-                @herd(name="layer3", sizes=[1, 1])
-                def herd_body(tx, ty, sx, sy):
-                    activations_in = AllocOp(activationsInL1_ty, [], [])
-                    weights_in = AllocOp(weightsInLayer3L1_ty, [], [])
-                    activations_out = AllocOp(activationsOutL1_ty, [], [])
+                    ChannelPut("bn10_act_layer2_layer3", activations_out_0)
 
-                    ChannelGet("ActivationsLayer2Layer3", activations_in)
-                    ChannelGet("WeightsInLayer3", weights_in)
+                    DeallocOp(activations_in_0)
+                    DeallocOp(activations_in_1)
+                    DeallocOp(activations_out_0)
 
-                    # Passthrough the beginning
-                    for i in range_(ACTIVATIONS_IN_SIZE - WEIGHTS_SIZE_LAYER3):
-                        val = load(activations_in, [i])
-                        store(val, activations_out, [i])
-                        yield_([])
+                    # middle
+                    for _ in range_(bn10_InH2 - 2):
+                        activations_in_2 = AllocOp(bn10_layer2_in_ty, [], [])
+                        activations_in_3 = AllocOp(bn10_layer2_in_ty, [], [])
+                        activations_in_4 = AllocOp(bn10_layer2_in_ty, [], [])
 
-                    # Do something with the second bit of data
-                    for i in range_(WEIGHTS_SIZE_LAYER3):
-                        index = arith.AddIOp(
-                            i,
-                            arith.ConstantOp.create_index(
-                                ACTIVATIONS_IN_SIZE - WEIGHTS_SIZE_LAYER3
-                            ),
+                        ChannelGet("bn10_act_layer1_layer2", activations_in_2)
+                        ChannelGet("bn10_act_layer1_layer2", activations_in_3)
+                        ChannelGet("bn10_act_layer1_layer2", activations_in_4)
+
+                        activations_out_1 = AllocOp(bn10_layer2_out_ty, [], [])
+
+                        c0 = arith.ConstantOp.create_index(0)
+                        set_memory(
+                            activations_out_1,
+                            bn10_layer2_out_ty,
+                            load(weights_in, [c0]),
+                            load(activations_in_4, [c0, c0, c0]),
                         )
-                        val = load(activations_in, [index])
-                        weight_val = load(weights_in, [i])
-                        val_out = arith.AddIOp(val, weight_val)
-                        store(val_out, activations_out, [index])
+
+                        ChannelPut("bn10_act_layer2_layer3", activations_out_1)
+
+                        DeallocOp(activations_in_2)
+                        DeallocOp(activations_in_3)
+                        DeallocOp(activations_in_4)
+                        DeallocOp(activations_out_1)
                         yield_([])
 
-                    # Send transformed activations to the next layer
-                    ChannelPut("ActivationsOut", activations_out)
+                    # last part
+                    activations_in_5 = AllocOp(bn10_layer2_in_ty, [], [])
+                    activations_in_6 = AllocOp(bn10_layer2_in_ty, [], [])
 
-                    # Cleanup
-                    DeallocOp(activations_in)
+                    ChannelGet("bn10_act_layer1_layer2", activations_in_5)
+                    ChannelGet("bn10_act_layer1_layer2", activations_in_6)
+
+                    activations_out_2 = AllocOp(bn10_layer2_out_ty, [], [])
+
+                    c0 = arith.ConstantOp.create_index(0)
+                    set_memory(
+                        activations_out_2,
+                        bn10_layer2_out_ty,
+                        load(weights_in, [c0]),
+                        load(activations_in_6, [c0, c0, c0]),
+                    )
+
+                    ChannelPut("bn10_act_layer2_layer3", activations_out_2)
+
+                    DeallocOp(activations_in_5)
+                    DeallocOp(activations_in_6)
+                    DeallocOp(activations_out_2)
+
+                @herd(name="bn10_layer3", sizes=[1, 1])
+                def herd_body(tx, ty, sx, sy):
+                    weights_in = AllocOp(bn10_layer3_wts_ty, [], [])
+                    ChannelGet("bn10_wts_layer3", weights_in)
+
+                    for _ in range_(bn10_InH3):
+                        activations_in = AllocOp(bn10_layer3_in_ty, [], [])
+                        activations_out = AllocOp(bn10_layer3_out_ty, [], [])
+
+                        ChannelGet("bn10_act_layer2_layer3", activations_in)
+
+                        c0 = arith.ConstantOp.create_index(0)
+                        set_memory(
+                            activations_out,
+                            bn10_layer3_out_ty,
+                            load(weights_in, [c0]),
+                            load(activations_in, [c0, c0, c0]),
+                        )
+
+                        ChannelPut("bn10_act_layer3_memtile", activations_out)
+
+                        DeallocOp(activations_in)
+                        DeallocOp(activations_out)
+                        yield_([])
+
                     DeallocOp(weights_in)
-                    DeallocOp(activations_out)
 
 
 if __name__ == "__main__":
@@ -216,29 +326,20 @@ if __name__ == "__main__":
         print(mlir_module)
         exit(0)
 
-    activationsIn = np.full(shape=(ACTIVATIONS_IN_SIZE,), fill_value=1, dtype=np.int8)
-    weightsIn = np.zeros(shape=(WEIGHTS_SIZE,), dtype=np.int8)
-    activationsOut = np.full(shape=(ACTIVATIONS_IN_SIZE,), fill_value=1, dtype=np.int8)
+    activationsIn = np.full(shape=(activationsInSize,), fill_value=1, dtype=np.int8)
+    weightsIn = np.zeros(shape=(bn10_totalWeightsSize,), dtype=np.int8)
+    activationsOut = np.full(shape=(activationsOutSize,), fill_value=1, dtype=np.int8)
 
-    for i in range(WEIGHTS_SIZE):
-        if i < WEIGHTS_SIZE_LAYER1:
+    for i in range(bn10_totalWeightsSize):
+        if i < bn10_layer1_wts_size:
             weightsIn[i] = 1
-        elif i < WEIGHTS_SIZE_LAYER1 + WEIGHTS_SIZE_LAYER2:
+        elif i < bn10_layer1_wts_size + bn10_layer2_wts_size:
             weightsIn[i] = 3
         else:
             weightsIn[i] = 7
 
-    for i in range(WEIGHTS_SIZE_LAYER1):
-        activationsOut[i] = (activationsOut[i] + weightsIn[i]) % 0xF
-    for i in range(WEIGHTS_SIZE_LAYER2):
-        activationsOut[i] = (
-            activationsOut[i] + weightsIn[WEIGHTS_SIZE_LAYER1 + i]
-        ) % 0xF
-    for i in range(WEIGHTS_SIZE_LAYER3):
-        activationsOut[(ACTIVATIONS_IN_SIZE - WEIGHTS_SIZE_LAYER3) + i] = (
-            activationsOut[(ACTIVATIONS_IN_SIZE - WEIGHTS_SIZE_LAYER3) + i]
-            + weightsIn[(WEIGHTS_SIZE - WEIGHTS_SIZE_LAYER3) + i]
-        ) % 0xF
+    for i in range(activationsOutSize):
+        activationsOut[i] += 1 + 3 + 7
 
     runner = XRTRunner(verbose=args.verbose, experimental_passes=True)
     exit(
