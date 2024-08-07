@@ -207,12 +207,15 @@ def build_module():
                     weights_in = AllocOp(bn10_layer2_wts_ty, [], [])
                     ChannelGet("bn10_wts_layer2", weights_in)
 
-                    bytes_input = np.prod(bn10_layer2_in_ty.shape) * (
-                        2 + (bn10_InH2 - 2) * 3 + 2
-                    )
+                    actual_count = 2 + (bn10_InH2 - 2) * 3 + 2
+                    bytes_input = np.prod(bn10_layer2_in_ty.shape) * actual_count
                     expected_bytes_input = np.prod(bn10_layer1_out_ty.shape) * bn10_InH1
+                    input_count = expected_bytes_input // np.prod(
+                        bn10_layer2_in_ty.shape
+                    )
+                    count_mod = expected_bytes_input % np.prod(bn10_layer2_in_ty.shape)
                     print(
-                        f"bn10_layer2 TOTAL INPUT: {bytes_input}, EXPECTED INPUT: {expected_bytes_input}"
+                        f"bn10_layer2 TOTAL INPUT: {bytes_input}, EXPECTED INPUT: {expected_bytes_input} (count should be: {input_count}, but is: {actual_count}) (count % size = {count_mod})"
                     )
                     assert bytes_input == expected_bytes_input
 
