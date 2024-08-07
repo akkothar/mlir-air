@@ -17,6 +17,11 @@ WEIGHTS_SIZE_LAYER2 = 16
 WEIGHTS_SIZE_LAYER3 = 8
 WEIGHTS_SIZE = WEIGHTS_SIZE_LAYER1 + WEIGHTS_SIZE_LAYER2 + WEIGHTS_SIZE_LAYER3
 
+# so we can convert to int32 for channel offset
+assert WEIGHTS_SIZE_LAYER1 % 4 == 0
+assert WEIGHTS_SIZE_LAYER2 % 4 == 0
+assert WEIGHTS_SIZE_LAYER3 % 4 == 0
+
 ACTIVATIONS_IN_SIZE = 16
 ACTIVATIONS_OUT_SIZE = 16
 assert ACTIVATIONS_IN_SIZE == ACTIVATIONS_OUT_SIZE
@@ -173,7 +178,7 @@ def build_module():
                             ),
                         )
                         val = load(activations_in, [index])
-                        weight_val = load(weights_in, [index])
+                        weight_val = load(weights_in, [i])
                         val_out = arith.AddIOp(val, weight_val)
                         store(val_out, activations_out, [index])
                         yield_([])
@@ -212,6 +217,8 @@ if __name__ == "__main__":
 
     activationsIn = np.full(shape=(ACTIVATIONS_IN_SIZE,), fill_value=1, dtype=np.int32)
     weightsIn = np.zeros(shape=(WEIGHTS_SIZE,), dtype=np.int32)
+    activationsOut = np.full(shape=(ACTIVATIONS_IN_SIZE,), fill_value=1, dtype=np.int32)
+
     for i in range(WEIGHTS_SIZE):
         if i < WEIGHTS_SIZE_LAYER1:
             weightsIn[i] = 1
@@ -219,9 +226,18 @@ if __name__ == "__main__":
             weightsIn[i] = 3
         else:
             weightsIn[i] = 7
-    activationsOut = np.zeros(shape=(ACTIVATIONS_OUT_SIZE,), dtype=np.int32)
 
-    runner = XRTRunner(verbose=args.verbose, experimental_passes=False)
+    for i in range(WEIGHTS_SIZE_LAYER1):
+        activationsOut[i] += weightsIn[i]
+    for i in range(WEIGHTS_SIZE_LAYER2):
+        activationsOut[i] += weightsIn[WEIGHTS_SIZE_LAYER1 + i]
+    for i in range(WEIGHTS_SIZE_LAYER3):
+        print((WEIGHTS_SIZE - WEIGHTS_SIZE_LAYER3) + i)
+        activationsOut[(ACTIVATIONS_IN_SIZE - WEIGHTS_SIZE_LAYER3) + i] += weightsIn[
+            (WEIGHTS_SIZE - WEIGHTS_SIZE_LAYER3) + i
+        ]
+
+    runner = XRTRunner(verbose=args.verbose, experimental_passes=True)
     exit(
         runner.run_test(
             mlir_module,
