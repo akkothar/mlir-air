@@ -128,7 +128,10 @@ def build_module():
     )
 
     ChannelOp("bn10_act_memtile_layer1")
-    ChannelOp("bn10_act_layer1_layer2")
+
+    # these conditions must be true because channel size is shared between layer1 and layer2
+    assert bn10_layer1_out_ty == bn10_layer2_in_ty and bn10_InH1 == bn10_InH2
+    ChannelOp("bn10_act_layer1_layer2", size=[1, bn10_InH2])
     ChannelOp("bn10_act_layer2_layer3")
     ChannelOp("bn10_act_layer3_memtile")
 
@@ -182,7 +185,7 @@ def build_module():
                     )
                     assert bytes_input == expected_bytes_input
 
-                    for _ in range_(bn10_InH1):
+                    for i in range_(bn10_InH1):
                         activations_in = AllocOp(bn10_layer1_in_ty, [], [])
                         activations_out = AllocOp(bn10_layer1_out_ty, [], [])
 
@@ -196,7 +199,11 @@ def build_module():
                             load(activations_in, [c0, c0, c0]),
                         )
 
-                        ChannelPut("bn10_act_layer1_layer2", activations_out)
+                        ChannelPut(
+                            "bn10_act_layer1_layer2",
+                            activations_out,
+                            indices=[0, i],
+                        )
 
                         DeallocOp(activations_in)
                         DeallocOp(activations_out)
@@ -216,11 +223,15 @@ def build_module():
                     assert bytes_input == expected_bytes_input
 
                     ######### Do stuff
-                    for _ in range_(bn10_InH2):
+                    for i in range_(bn10_InH2):
                         activations_in = AllocOp(bn10_layer2_in_ty, [], [])
                         activations_out = AllocOp(bn10_layer2_out_ty, [], [])
 
-                        ChannelGet("bn10_act_layer1_layer2", activations_in)
+                        ChannelGet(
+                            "bn10_act_layer1_layer2",
+                            activations_in,
+                            indices=[0, i],
+                        )
 
                         c0 = arith.ConstantOp.create_index(0)
                         set_memory(
